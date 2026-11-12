@@ -1,0 +1,23 @@
+{
+  "site_name": "Buenas Noticias",
+  "tagline": "Lo que sí está saliendo bien en el mundo",
+  "site_url": "",
+  "language": "es",
+  "max_articles": 400,
+  "max_new_per_run": 15,
+  "summary_max_chars": 320,
+  "ai_model": "claude-haiku-5-5",
+  "categories": ["Ciencia", "Salud", "Medio ambiente", "Comunidad", "Tecnología", "Animales", "Cultura"],
+  "feeds": [
+    {"name": "Good News Network", "url": "https://www.goodnewsnetwork.org/feed/"},
+    {"name": "Positive News", "url": "https://www.positive.news/feed/"},
+    {"name": "Reasons to be Cheerful", "url": "https://reasonstobecheerful.world/feed/"},
+    {"name": "The Optimist Daily", "url": "https://www.optimistdaily.com/feed/"},
+    {"name": "Yes! Magazine", "url": "https://www.yesmagazine.org/feed"}
+  ],
+  "blocklist": [
+    "killed", "dies", "dead", "death", "murder", "shooting", "war ", "attack", "terror", "crash",
+    "tragedy", "abuse", "rape", "kidnap", "bomb", "massacre", "suicide",
+    "muere", "muerte", "asesin", "ataque", "guerra", "tiroteo", "tragedia", "secuestr", "masacre"
+  ]
+}
