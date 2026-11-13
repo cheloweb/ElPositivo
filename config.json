@@ -11,11 +11,12 @@
   "categories": ["Ciencia", "Salud", "Medio ambiente", "Comunidad", "Tecnología", "Animales", "Cultura"],
   "feeds": [
     {"name": "Noticias Positivas", "url": "https://noticiaspositivas.org/feed/", "lang": "es", "mode": "curated"},
-    {"name": "Solo Buenas Noticias", "url": "https://solobuenasnoticias.com/feed/", "lang": "es", "mode": "curated"},
     {"name": "Son Buenas Noticias", "url": "https://sonbuenasnoticias.com/feed/", "lang": "es", "mode": "curated"},
     {"name": "Mongabay Latam", "url": "https://es.mongabay.com/feed/", "lang": "es", "mode": "keywords"},
-    {"name": "Agencia SINC", "url": "https://www.agenciasinc.es/rss/feed/ultimas-noticias", "lang": "es", "mode": "keywords"},
-    {"name": "Ecoosfera", "url": "https://ecoosfera.com/feed/", "lang": "es", "mode": "keywords"}
+    {"name": "Agencia SINC", "url": "https://www.agenciasinc.es/feed/Noticias", "lang": "es", "mode": "keywords"},
+    {"name": "Ecoosfera", "url": "https://ecoosfera.com/feed/", "lang": "es", "mode": "keywords"},
+{"name": "EcoInventos", "url": "https://ecoinventos.com/feed/", "lang": "es", "mode": "curated"},
+{"name": "Noticias ONU - ODS", "url": "https://news.un.org/feed/subscribe/es/news/topic/sdgs/feed/rss.xml", "lang": "es", "mode": "keywords"}
   ],
   "positive_keywords": [
     "recupera", "logra", "consigue", "avance", "éxito", "exito", "récord", "record", "descubr", "esperanza",
