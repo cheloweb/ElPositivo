@@ -6,6 +6,7 @@ Uso:
     python build.py             # descarga feeds, cura, genera public/
     python build.py --no-fetch  # solo regenera el sitio con data/articles.json
 """
+import gzip
 import hashlib
 import html
 import json
@@ -80,9 +81,15 @@ def parse_date(s):
 
 # ---------------------------------------------------------------- ingesta
 def http_get(url, timeout=25):
-    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    req = urllib.request.Request(url, headers={
+        "User-Agent": UA,
+        "Accept": "application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5",
+    })
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read()
+        data = r.read()
+    if data[:2] == b"\x1f\x8b":  # algunos servidores envían gzip aunque no se pida
+        data = gzip.decompress(data)
+    return data.lstrip(b"\xef\xbb\xbf \t\r\n")  # quita BOM y espacios iniciales
 
 
 def parse_feed(xml_bytes):
@@ -137,15 +144,21 @@ def has_positive_keyword(text):
 def check_feeds():
     """Comprueba cada feed de config.json: python build.py --check"""
     for feed in CFG["feeds"]:
+        raw = b""
         try:
-            items = parse_feed(http_get(feed["url"]))
+            raw = http_get(feed["url"])
+            items = parse_feed(raw)
             imgs = sum(1 for i in items if i.get("image"))
             last = max((parse_date(i.get("date")) for i in items), default=None)
+            if not items:
+                print(f"AVISO {feed['name']}: responde pero no hay notas (¿no es un feed?). Empieza por: {raw[:150]!r}")
+                continue
             print(f"OK   {feed['name']}: {len(items)} items, {imgs} con imagen, último: {last.date() if last else '-'}")
-            if items:
-                print(f"       ej.: {items[0]['title'][:80]}")
+            print(f"       ej.: {items[0]['title'][:80]}")
         except Exception as ex:
             print(f"FALLA {feed['name']} ({feed['url']}): {ex}")
+            if raw:
+                print(f"       la respuesta empieza por: {raw[:150]!r}")
 
 
 def call_claude(prompt):
