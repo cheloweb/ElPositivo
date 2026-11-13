@@ -24,6 +24,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Comprobar estado de los feeds
+        run: python build.py --check
+        continue-on-error: true
       - name: Generar sitio
         run: python build.py
         env:
