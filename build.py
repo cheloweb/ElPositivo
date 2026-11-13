@@ -129,6 +129,25 @@ def passes_blocklist(text):
     return not any(w in t for w in CFG["blocklist"])
 
 
+def has_positive_keyword(text):
+    t = text.lower()
+    return any(w in t for w in CFG.get("positive_keywords", []))
+
+
+def check_feeds():
+    """Comprueba cada feed de config.json: python build.py --check"""
+    for feed in CFG["feeds"]:
+        try:
+            items = parse_feed(http_get(feed["url"]))
+            imgs = sum(1 for i in items if i.get("image"))
+            last = max((parse_date(i.get("date")) for i in items), default=None)
+            print(f"OK   {feed['name']}: {len(items)} items, {imgs} con imagen, último: {last.date() if last else '-'}")
+            if items:
+                print(f"       ej.: {items[0]['title'][:80]}")
+        except Exception as ex:
+            print(f"FALLA {feed['name']} ({feed['url']}): {ex}")
+
+
 def call_claude(prompt):
     key = os.environ.get("ANTHROPIC_API_KEY")
     if not key:
@@ -175,12 +194,13 @@ Texto: {summary[:1200]}"""
 def guess_category(text):
     t = text.lower()
     rules = {
-        "Ciencia": ["scien", "research", "study", "discover", "ciencia", "investig"],
-        "Salud": ["health", "cancer", "vaccine", "medic", "salud", "hospital"],
-        "Medio ambiente": ["climate", "forest", "renewable", "solar", "ocean", "wildlife", "clima", "ambient"],
-        "Tecnología": ["tech", "ai ", "robot", "software", "tecnolog"],
-        "Animales": ["dog", "cat ", "animal", "species", "rescue", "perro", "especie"],
-        "Cultura": ["art ", "music", "film", "book", "museum", "arte", "música"],
+        "Ciencia": ["scien", "research", "study", "discover", "ciencia", "científic", "investig", "descubr"],
+        "Salud": ["health", "cancer", "cáncer", "vaccine", "vacuna", "medic", "salud", "hospital", "tratamiento"],
+        "Medio ambiente": ["climate", "forest", "renewable", "solar", "ocean", "wildlife", "clima", "ambient",
+                           "bosque", "renovable", "energía", "océano", "reciclaj", "sostenib", "conservaci"],
+        "Tecnología": ["tech", "ai ", "robot", "software", "tecnolog", "inteligencia artificial", "app "],
+        "Animales": ["dog", "cat ", "animal", "species", "rescue", "perro", "gato", "especie", "rescat", "fauna"],
+        "Cultura": ["art ", "music", "film", "book", "museum", "arte", "música", "cine", "libro", "museo", "festival"],
     }
     for cat, words in rules.items():
         if any(w in t for w in words):
@@ -210,7 +230,12 @@ def fetch_new(articles):
             if not passes_blocklist(it["title"] + " " + raw[:400]):
                 known.add(aid)
                 continue
-            ai = ai_curate(it["title"], raw)
+            if feed.get("mode") == "keywords" and not has_positive_keyword(it["title"] + " " + raw[:400]):
+                known.add(aid)
+                continue
+            # Feeds en español no necesitan traducción: se omite la IA (y el gasto de API).
+            use_ai = feed.get("lang", "en") != "es" or CFG.get("ai_for_spanish", False)
+            ai = ai_curate(it["title"], raw) if use_ai else None
             if ai is not None and not ai.get("positiva", False):
                 known.add(aid)
                 continue
@@ -359,6 +384,9 @@ def main():
     if os.environ.get("SITE_URL"):
         CFG["site_url"] = os.environ["SITE_URL"].rstrip("/")
     CFG["site_url"] = CFG["site_url"].rstrip("/")
+    if "--check" in sys.argv:
+        check_feeds()
+        return
     arts = json.loads(DATA_FILE.read_text(encoding="utf-8")) if DATA_FILE.exists() else []
     if "--no-fetch" not in sys.argv:
         arts = fetch_new(arts) + arts

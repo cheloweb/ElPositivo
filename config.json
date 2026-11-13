@@ -7,17 +7,27 @@
   "max_new_per_run": 15,
   "summary_max_chars": 320,
   "ai_model": "claude-haiku-5-5",
+  "ai_for_spanish": false,
   "categories": ["Ciencia", "Salud", "Medio ambiente", "Comunidad", "Tecnología", "Animales", "Cultura"],
   "feeds": [
-    {"name": "Good News Network", "url": "https://www.goodnewsnetwork.org/feed/"},
-    {"name": "Positive News", "url": "https://www.positive.news/feed/"},
-    {"name": "Reasons to be Cheerful", "url": "https://reasonstobecheerful.world/feed/"},
-    {"name": "The Optimist Daily", "url": "https://www.optimistdaily.com/feed/"},
-    {"name": "Yes! Magazine", "url": "https://www.yesmagazine.org/feed"}
+    {"name": "Noticias Positivas", "url": "https://noticiaspositivas.org/feed/", "lang": "es", "mode": "curated"},
+    {"name": "Solo Buenas Noticias", "url": "https://solobuenasnoticias.com/feed/", "lang": "es", "mode": "curated"},
+    {"name": "Son Buenas Noticias", "url": "https://sonbuenasnoticias.com/feed/", "lang": "es", "mode": "curated"},
+    {"name": "Mongabay Latam", "url": "https://es.mongabay.com/feed/", "lang": "es", "mode": "keywords"},
+    {"name": "Agencia SINC", "url": "https://www.agenciasinc.es/rss/feed/ultimas-noticias", "lang": "es", "mode": "keywords"},
+    {"name": "Ecoosfera", "url": "https://ecoosfera.com/feed/", "lang": "es", "mode": "keywords"}
+  ],
+  "positive_keywords": [
+    "recupera", "logra", "consigue", "avance", "éxito", "exito", "récord", "record", "descubr", "esperanza",
+    "salva", "rescat", "solidari", "innovaci", "mejora", "reduce", "reducción", "supera", "curar", "cura ",
+    "vacuna", "primera vez", "galardon", "premio", "proteg", "restaur", "reforest", "renovable", "regresa",
+    "vuelve", "población aumenta", "crece", "recuper", "ayuda", "gracias a"
   ],
   "blocklist": [
     "killed", "dies", "dead", "death", "murder", "shooting", "war ", "attack", "terror", "crash",
     "tragedy", "abuse", "rape", "kidnap", "bomb", "massacre", "suicide",
-    "muere", "muerte", "asesin", "ataque", "guerra", "tiroteo", "tragedia", "secuestr", "masacre"
+    "muere", "muerte", "muert", "fallec", "asesin", "ataque", "guerra", "tiroteo", "tragedia", "secuestr",
+    "masacre", "accidente", "víctima", "victima", "violación", "violacion", "atentado", "incendio",
+    "terremoto", "naufragio", "crimen", "detenid", "condena", "suicid", "brote"
   ]
 }
