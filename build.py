@@ -13,6 +13,8 @@ import html
 import json
 import os
 import re
+import shutil
+import struct
 import sys
 import unicodedata
 import urllib.request
@@ -31,11 +33,12 @@ ROOT = Path(__file__).parent
 CFG = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
 DATA_FILE = ROOT / "data" / "articles.json"
 OUT = ROOT / "public"
+ASSETS = ROOT / "assets"
 UA = "Mozilla/5.0 (compatible; BuenasNoticiasBot/1.0)"
 MESES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio",
          "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
 DIAS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
-PALETTE = ["#4f5bd5", "#e0525a", "#1f9d6e", "#e08a00", "#0891b2", "#a8691c", "#9b51e0", "#5b6b7d"]
+PALETTE = ["#4f5bd5", "#e0525a", "#1f9d6e", "#e08a00", "#0891b2", "#c47f2a", "#9b51e0", "#5b6b7d"]
 
 
 # ---------------------------------------------------------------- utilidades
@@ -411,14 +414,25 @@ def fetch_new(articles):
     return new
 
 
+def png_size(path):
+    try:
+        with open(path, "rb") as f:
+            head = f.read(24)
+        return struct.unpack(">II", head[16:24])
+    except Exception:
+        return None
+
+
+LOGO_SIZE = png_size(ASSETS / "logo.png")
+
 # ---------------------------------------------------------------- estilos
 CSS_BASE = """
 :root{
- --bg:#f3f6f9;--paper:#fff;--ink:#14213d;--muted:#566779;--line:#dde5ee;--sun:#ffc933;--btn:#14213d;--btn-ink:#fff;
+ --bg:#f4f7fb;--paper:#fff;--ink:#012d5c;--muted:#4b627c;--line:#dbe4ef;--sun:#febd06;--sun-deep:#f5a200;--btn:#012d5c;--btn-ink:#fff;
  --serif:Charter,"Bitstream Charter","Sitka Text",Cambria,"Iowan Old Style",Georgia,serif;
  --sans:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
 }
-@media(prefers-color-scheme:dark){:root{--bg:#0e1621;--paper:#152030;--ink:#eaf1f8;--muted:#9fb1c3;--line:#26364a;--btn:#ffc933;--btn-ink:#14213d}}
+@media(prefers-color-scheme:dark){:root{--bg:#061a33;--paper:#0b2547;--ink:#eaf1f8;--muted:#a3b6cc;--line:#1d3a63;--btn:#febd06;--btn-ink:#012d5c}}
 *{box-sizing:border-box}
 html{-webkit-text-size-adjust:100%}
 body{margin:0;background:var(--bg);color:var(--ink);font:17px/1.6 var(--sans)}
@@ -427,14 +441,20 @@ img{max-width:100%}
 :focus-visible{outline:3px solid #3b82f6;outline-offset:2px;border-radius:4px}
 .wrap{max-width:1180px;margin:0 auto;padding:0 20px}
 
-header.site{position:sticky;top:0;z-index:20;background:var(--paper);border-bottom:1px solid var(--line)}
-.bar{display:flex;align-items:center;justify-content:space-between;gap:16px;height:62px}
-.brand{display:flex;align-items:center;gap:12px;font:800 1.55rem/1 var(--serif);letter-spacing:-.02em}
-.sun{width:24px;height:24px;border-radius:50%;background:var(--sun);box-shadow:0 0 0 5px rgba(255,201,51,.3);flex:none}
-.search-btn{display:flex;align-items:center;gap:8px;padding:9px 16px;border-radius:999px;border:1px solid var(--line);
+header.site{background:var(--paper)}
+.masthead{display:flex;justify-content:center}
+.brand{display:block;line-height:0;margin:16px 0 12px}
+.brand-text{font:800 1.8rem/1 var(--serif);letter-spacing:-.02em;line-height:1}
+.logo{height:clamp(66px,10vw,108px);width:auto;display:block}
+.compact .logo{height:clamp(52px,7vw,70px)}
+.navbar{position:sticky;top:0;z-index:20;background:var(--paper);border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.navrow{display:flex;align-items:center;gap:12px}
+.search-btn{flex:none;display:flex;align-items:center;gap:8px;padding:9px 16px;border-radius:999px;border:1px solid var(--line);
  background:var(--bg);color:var(--ink);font:600 .92rem var(--sans);cursor:pointer}
 .search-btn:hover{border-color:var(--ink)}
-nav.cats{display:flex;gap:6px;overflow-x:auto;padding:0 0 10px;scrollbar-width:none;margin:0 -4px}
+nav.cats{flex:1;min-width:0;display:flex;gap:6px;overflow-x:auto;padding:9px 0;scrollbar-width:none}
+nav.cats a:first-child{margin-left:auto}
+nav.cats a:last-child{margin-right:auto}
 nav.cats::-webkit-scrollbar{display:none}
 nav.cats a{display:flex;align-items:center;gap:8px;padding:7px 14px;border-radius:999px;white-space:nowrap;
  font:600 .92rem var(--sans);color:var(--ink)}
@@ -639,22 +659,35 @@ def page(title, body, depth, desc="", og_image="", canonical="", current=None):
     for c in CFG["categories"]:
         cur = ' aria-current="page"' if current == c else ""
         items.append(f'<a class="{cat_cls(c)}" href="{r}categoria/{slugify(c)}.html"{cur}><i></i>{esc(c)}</a>')
+    if not og_image and CFG["site_url"] and (ASSETS / "og-default.png").exists():
+        og_image = CFG["site_url"] + "/og-default.png"
     og = f'<meta property="og:image" content="{esc(og_image)}">' if og_image else ""
+    name = esc(CFG["site_name"])
+    if LOGO_SIZE:
+        alt = esc(CFG["site_name"] + ": " + CFG["tagline"])
+        brand = (f'<a class="brand" href="{r}index.html"><picture>'
+                 f'<source srcset="{r}logo-dark.png" media="(prefers-color-scheme: dark)">'
+                 f'<img class="logo" src="{r}logo.png" width="{LOGO_SIZE[0]}" height="{LOGO_SIZE[1]}" alt="{alt}"></picture></a>')
+    else:
+        brand = f'<a class="brand brand-text" href="{r}index.html">{name}</a>'
+    if (ASSETS / "favicon.png").exists():
+        icons = f'<link rel="icon" type="image/png" href="{r}favicon.png"><link rel="apple-touch-icon" href="{r}apple-touch-icon.png">'
+    else:
+        icons = f'<link rel="icon" href="{FAVICON}">'
     can = f'<link rel="canonical" href="{esc(canonical)}">' if canonical else ""
     feed = (f'<link rel="alternate" type="application/rss+xml" title="{esc(CFG["site_name"])}" href="{r}feed.xml">'
             if CFG["site_url"] else "")
     rss = f' <a href="{r}feed.xml">Suscríbete por RSS</a>.' if CFG["site_url"] else ""
     d = esc(desc or CFG["tagline"])
     return f"""<!doctype html><html lang="{CFG['language']}" data-root="{r}"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#ffc933">
+<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#012d5c">
 <title>{esc(title)}</title><meta name="description" content="{d}">
 <meta property="og:title" content="{esc(title)}"><meta property="og:description" content="{d}"><meta property="og:type" content="website">
-{og}{can}{feed}<link rel="icon" href="{FAVICON}"><link rel="stylesheet" href="{r}style.css">
+{og}{can}{feed}{icons}<link rel="stylesheet" href="{r}style.css">
 <noscript><style>.more[hidden]{{display:block}}.more-btn{{display:none}}</style></noscript></head><body>
-<header class="site"><div class="wrap"><div class="bar">
-<a class="brand" href="{r}index.html"><span class="sun"></span>{esc(CFG['site_name'])}</a>
-<button class="search-btn" type="button" data-search aria-label="Buscar historias">{SEARCH_ICON}<span>Buscar</span></button>
-</div><nav class="cats" aria-label="Secciones">{"".join(items)}</nav></div></header>
+<header class="site{' compact' if depth else ''}"><div class="wrap masthead">{brand}</div></header>
+<div class="navbar"><div class="wrap navrow"><nav class="cats" aria-label="Secciones">{"".join(items)}</nav>
+<button class="search-btn" type="button" data-search aria-label="Buscar historias">{SEARCH_ICON}<span>Buscar</span></button></div></div>
 <main class="wrap">{body}</main>
 <footer class="site"><div class="wrap"><p><strong>{esc(CFG['site_name'])}</strong> reúne noticias positivas de medios de todo el mundo. Cada historia es un resumen que enlaza a la fuente original.{rss}</p>
 <p>© {datetime.now().year}</p></div></footer>
@@ -751,6 +784,10 @@ def write(path, content):
 def build_site(arts):
     built = datetime.now(site_tz())
     OUT.mkdir(exist_ok=True)
+    if ASSETS.exists():
+        for f in ASSETS.iterdir():
+            if f.is_file():
+                shutil.copy2(f, OUT / f.name)
     for old in (OUT / "nota").glob("*.html") if (OUT / "nota").exists() else []:
         old.unlink()
     write(OUT / "style.css", build_css())
