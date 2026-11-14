@@ -5,6 +5,7 @@ Solo usa la librería estándar de Python (sin dependencias).
 Uso:
     python build.py             # descarga feeds, cura, genera public/
     python build.py --no-fetch  # solo regenera el sitio con data/articles.json
+    python build.py --check     # comprueba que cada feed de config.json responde
 """
 import gzip
 import hashlib
@@ -19,6 +20,12 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
+from urllib.parse import urljoin
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover
+    ZoneInfo = None
 
 ROOT = Path(__file__).parent
 CFG = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
@@ -27,6 +34,8 @@ OUT = ROOT / "public"
 UA = "Mozilla/5.0 (compatible; BuenasNoticiasBot/1.0)"
 MESES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio",
          "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
+DIAS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
+PALETTE = ["#4f5bd5", "#e0525a", "#1f9d6e", "#e08a00", "#0891b2", "#a8691c", "#9b51e0", "#5b6b7d"]
 
 
 # ---------------------------------------------------------------- utilidades
@@ -45,6 +54,15 @@ def strip_html(s):
     return re.sub(r"\s+", " ", html.unescape(s)).strip()
 
 
+def clean_summary(s):
+    """Quita los pies típicos de WordPress ("La entrada X se publicó primero en Y", "[…]")."""
+    s = re.sub(r"\s*(La entrada|El artículo|The post|The article)\b.{0,250}?"
+               r"(apareció primero en|se publicó primero en|appeared first on).*$", "", s, flags=re.S | re.I)
+    s = re.sub(r"\s*\[\s*(…|\.\.\.|&#8230;)\s*\]\s*$", "…", s)
+    s = re.sub(r"\s*(Leer más|Read more|Seguir leyendo)\W*$", "", s, flags=re.I)
+    return s.strip()
+
+
 def truncate(s, n):
     if len(s) <= n:
         return s
@@ -55,6 +73,14 @@ def fmt_date(iso):
     try:
         d = datetime.fromisoformat(iso)
         return f"{d.day} de {MESES[d.month - 1]} de {d.year}"
+    except Exception:
+        return ""
+
+
+def short_date(iso):
+    try:
+        d = datetime.fromisoformat(iso)
+        return f"{d.day} {MESES[d.month - 1][:3]}"
     except Exception:
         return ""
 
@@ -79,6 +105,95 @@ def parse_date(s):
     return d.astimezone(timezone.utc)
 
 
+def site_tz():
+    name = CFG.get("timezone", "Europe/Madrid")
+    if ZoneInfo:
+        try:
+            return ZoneInfo(name)
+        except Exception:
+            pass
+    return timezone.utc
+
+
+# ---------------------------------------------------------------- imágenes
+BAD_IMAGE_HINTS = ("1x1", "pixel", "spacer", "blank.gif", "gravatar.com", "/emoji/", "smilies", "transparent.")
+
+
+def normalize_image(u, base=""):
+    """Devuelve una URL https absoluta y utilizable, o "" si no sirve."""
+    u = html.unescape((u or "").strip())
+    if not u or u.startswith("data:"):
+        return ""
+    if u.startswith("//"):
+        u = "https:" + u
+    elif not re.match(r"^https?://", u, re.I):
+        u = urljoin(base, u) if base else ""
+    if u.lower().startswith("http://"):
+        u = "https://" + u[7:]  # evita contenido mixto bloqueado por el navegador
+    if not u or any(h in u.lower() for h in BAD_IMAGE_HINTS):
+        return ""
+    return u
+
+
+def first_image_in_html(h, base=""):
+    """Primera imagen real de un fragmento HTML, entendiendo lazy-load y srcset."""
+    for m in re.finditer(r"<img\b[^>]*>", h or "", re.I):
+        tag = m.group(0)
+        cands = []
+        for attr in ("data-src", "data-lazy-src", "data-original"):
+            mm = re.search(r"(?<![\w-])" + attr + r"\s*=\s*[\"']([^\"']+)", tag, re.I)
+            if mm:
+                cands.append(mm.group(1))
+        mm = re.search(r"(?<![\w-])srcset\s*=\s*[\"']\s*([^\s\"',]+)", tag, re.I)
+        if mm:
+            cands.append(mm.group(1))
+        mm = re.search(r"(?<![\w-])src\s*=\s*[\"']([^\"']+)", tag, re.I)
+        if mm:
+            cands.append(mm.group(1))
+        for c in cands:
+            n = normalize_image(c, base)
+            if n:
+                return n
+    return ""
+
+
+def fetch_og_image(url):
+    """Respaldo: lee la página de la nota y toma su imagen social (og:image)."""
+    if not CFG.get("fetch_page_images", True):
+        return ""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "text/html,*/*;q=0.5"})
+        with urllib.request.urlopen(req, timeout=12) as r:
+            page_html = r.read(400000).decode("utf-8", "ignore")
+    except Exception:
+        return ""
+    pats = (
+        r"<meta[^>]+(?:property|name)=[\"'](?:og:image(?::secure_url)?|twitter:image)[\"'][^>]*content=[\"']([^\"']+)",
+        r"<meta[^>]+content=[\"']([^\"']+)[\"'][^>]*(?:property|name)=[\"'](?:og:image|twitter:image)[\"']",
+    )
+    for p in pats:
+        m = re.search(p, page_html, re.I)
+        if m:
+            img = normalize_image(m.group(1), url)
+            if img:
+                return img
+    return ""
+
+
+def backfill_images(arts, limit=12):
+    """Normaliza imágenes guardadas y busca la imagen de notas que no tienen (una vez por nota)."""
+    tried = 0
+    for a in arts:
+        a["image"] = normalize_image(a.get("image", ""), a.get("url", ""))
+        if a["image"] or a.get("img_tried") or tried >= limit:
+            continue
+        a["img_tried"] = True
+        tried += 1
+        a["image"] = fetch_og_image(a["url"])
+    if tried:
+        print(f"Imágenes: se intentó recuperar {tried} notas sin imagen.")
+
+
 # ---------------------------------------------------------------- ingesta
 def http_get(url, timeout=25):
     req = urllib.request.Request(url, headers={
@@ -92,6 +207,23 @@ def http_get(url, timeout=25):
     return data.lstrip(b"\xef\xbb\xbf \t\r\n")  # quita BOM y espacios iniciales
 
 
+def mrss_image(sub):
+    if "mrss" not in sub.tag:
+        return None
+    u = sub.get("url")
+    if not u:
+        return None
+    t = local(sub.tag)
+    if t == "thumbnail":
+        return u
+    if t == "content":
+        med, typ = sub.get("medium") or "", sub.get("type") or ""
+        if med == "image" or typ.startswith("image") or (
+                not med and not typ and re.search(r"\.(jpe?g|png|webp|gif|avif)(\?|$)", u, re.I)):
+            return u
+    return None
+
+
 def parse_feed(xml_bytes):
     root = ET.fromstring(xml_bytes)
     items = []
@@ -101,11 +233,7 @@ def parse_feed(xml_bytes):
         d = {}
         for ch in e:
             tag, t = ch.tag, local(ch.tag)
-            if "mrss" in tag:  # media:content / media:thumbnail
-                if t in ("content", "thumbnail") and ch.get("url"):
-                    if t == "thumbnail" or ch.get("medium") in (None, "image") \
-                            or (ch.get("type") or "").startswith("image"):
-                        d.setdefault("image", ch.get("url"))
+            if "mrss" in tag:
                 continue
             if t == "title":
                 d["title"] = strip_html(ch.text)
@@ -121,11 +249,18 @@ def parse_feed(xml_bytes):
                 d.setdefault("date", ch.text)
             elif t == "enclosure" and (ch.get("type") or "").startswith("image"):
                 d.setdefault("image", ch.get("url"))
+        if not d.get("link"):
+            continue
         if not d.get("image"):
-            m = re.search(r'<img[^>]+src=["\']([^"\']+)', (d.get("content") or "") + (d.get("desc") or ""))
-            if m:
-                d["image"] = m.group(1)
-        if d.get("title") and d.get("link"):
+            for sub in e.iter():
+                img = mrss_image(sub)
+                if img:
+                    d["image"] = img
+                    break
+        d["image"] = normalize_image(d.get("image", ""), d["link"])
+        if not d["image"]:
+            d["image"] = first_image_in_html((d.get("content") or "") + (d.get("desc") or ""), d["link"])
+        if d.get("title"):
             items.append(d)
     return items
 
@@ -148,11 +283,11 @@ def check_feeds():
         try:
             raw = http_get(feed["url"])
             items = parse_feed(raw)
-            imgs = sum(1 for i in items if i.get("image"))
-            last = max((parse_date(i.get("date")) for i in items), default=None)
             if not items:
                 print(f"AVISO {feed['name']}: responde pero no hay notas (¿no es un feed?). Empieza por: {raw[:150]!r}")
                 continue
+            imgs = sum(1 for i in items if i.get("image"))
+            last = max((parse_date(i.get("date")) for i in items), default=None)
             print(f"OK   {feed['name']}: {len(items)} items, {imgs} con imagen, último: {last.date() if last else '-'}")
             print(f"       ej.: {items[0]['title'][:80]}")
         except Exception as ex:
@@ -212,7 +347,8 @@ def guess_category(text):
         "Medio ambiente": ["climate", "forest", "renewable", "solar", "ocean", "wildlife", "clima", "ambient",
                            "bosque", "renovable", "energía", "océano", "reciclaj", "sostenib", "conservaci"],
         "Tecnología": ["tech", "ai ", "robot", "software", "tecnolog", "inteligencia artificial", "app "],
-        "Animales": ["dog", "cat ", "animal", "species", "rescue", "perro", "gato", "especie", "rescat", "fauna"],
+        "Animales": ["dog", "cat ", "animal", "species", "rescue", "perro", "gato", "especie", "rescat", "fauna",
+                     "jaguar", "ballena", "tortuga"],
         "Cultura": ["art ", "music", "film", "book", "museum", "arte", "música", "cine", "libro", "museo", "festival"],
     }
     for cat, words in rules.items():
@@ -239,7 +375,7 @@ def fetch_new(articles):
             aid = hashlib.sha1(it["link"].encode()).hexdigest()[:10]
             if aid in known:
                 continue
-            raw = strip_html(it.get("desc") or it.get("content") or "")
+            raw = clean_summary(strip_html(it.get("desc") or it.get("content") or ""))
             if not passes_blocklist(it["title"] + " " + raw[:400]):
                 known.add(aid)
                 continue
@@ -257,6 +393,7 @@ def fetch_new(articles):
             cat = (ai or {}).get("categoria")
             if cat not in CFG["categories"]:
                 cat = guess_category(title + " " + raw)
+            image = it.get("image") or fetch_og_image(it["link"])
             known.add(aid)
             new.append({
                 "id": aid,
@@ -264,102 +401,346 @@ def fetch_new(articles):
                 "title": title,
                 "summary": truncate(summary, CFG["summary_max_chars"]),
                 "category": cat,
-                "image": it.get("image", ""),
+                "image": image,
+                "img_tried": True,
                 "source": feed["name"],
                 "url": it["link"],
                 "date": parse_date(it.get("date")).isoformat(),
             })
-            print(f"  + {title[:70]}")
+            print(f"  + {title[:70]}{'' if image else '  (sin imagen)'}")
     return new
 
 
-# ---------------------------------------------------------------- render
-CSS = """
-:root{--bg:#fbf8f3;--fg:#23201c;--mut:#6b655c;--card:#fff;--acc:#d9822b;--line:#e8e1d6}
-@media(prefers-color-scheme:dark){:root{--bg:#171512;--fg:#efe9df;--mut:#a39b8e;--card:#201d19;--line:#34302a}}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:17px/1.6 Georgia,'Times New Roman',serif}
-a{color:inherit;text-decoration:none}.wrap{max-width:1080px;margin:0 auto;padding:0 20px}
-header.top{border-bottom:1px solid var(--line);padding:22px 0 12px}
-.brand{font-size:2rem;font-weight:700;letter-spacing:-.5px}.brand span{color:var(--acc)}
-.tag{color:var(--mut);font-style:italic;margin:2px 0 12px}
-nav{display:flex;flex-wrap:wrap;gap:6px 16px;font:600 .85rem system-ui,sans-serif;text-transform:uppercase;letter-spacing:.5px}
-nav a{color:var(--mut)}nav a:hover{color:var(--acc)}
-.hero{display:grid;grid-template-columns:1.4fr 1fr;gap:28px;margin:28px 0;align-items:center}
-.hero img,.hero .ph{width:100%;aspect-ratio:16/10;object-fit:cover;border-radius:10px}
-.hero h2{font-size:2rem;line-height:1.2;margin:.3em 0}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:22px;margin:24px 0 48px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden;display:flex;flex-direction:column;transition:transform .15s}
-.card:hover{transform:translateY(-3px)}.card img,.card .ph{width:100%;aspect-ratio:16/10;object-fit:cover}
-.ph{background:linear-gradient(135deg,#f3d9b1,#e8a65b)}.cb{padding:14px 16px 18px}
-.cb h3{font-size:1.1rem;line-height:1.3;margin:.3em 0}.cb p{color:var(--mut);font-size:.93rem;margin:.3em 0}
-.cat{font:700 .72rem system-ui,sans-serif;text-transform:uppercase;letter-spacing:.8px;color:var(--acc)}
-time,.meta{font:.8rem system-ui,sans-serif;color:var(--mut)}
-article.nota{max-width:720px;margin:32px auto 56px}article.nota h1{font-size:2.3rem;line-height:1.15;margin:.2em 0}
-article.nota img{width:100%;border-radius:10px;margin:18px 0}.lead{font-size:1.2rem}
-.btn{display:inline-block;background:var(--acc);color:#fff;padding:10px 18px;border-radius:8px;font:600 .95rem system-ui,sans-serif;margin-top:10px}
-footer{border-top:1px solid var(--line);padding:24px 0 40px;color:var(--mut);font:.85rem system-ui,sans-serif}
-h1.sec{margin:28px 0 0}
-@media(max-width:760px){.hero{grid-template-columns:1fr}.hero h2{font-size:1.6rem}article.nota h1{font-size:1.8rem}}
+# ---------------------------------------------------------------- estilos
+CSS_BASE = """
+:root{
+ --bg:#f3f6f9;--paper:#fff;--ink:#14213d;--muted:#566779;--line:#dde5ee;--sun:#ffc933;--btn:#14213d;--btn-ink:#fff;
+ --serif:Charter,"Bitstream Charter","Sitka Text",Cambria,"Iowan Old Style",Georgia,serif;
+ --sans:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+}
+@media(prefers-color-scheme:dark){:root{--bg:#0e1621;--paper:#152030;--ink:#eaf1f8;--muted:#9fb1c3;--line:#26364a;--btn:#ffc933;--btn-ink:#14213d}}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font:17px/1.6 var(--sans)}
+a{color:inherit;text-decoration:none}
+img{max-width:100%}
+:focus-visible{outline:3px solid #3b82f6;outline-offset:2px;border-radius:4px}
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px}
+
+header.site{position:sticky;top:0;z-index:20;background:var(--paper);border-bottom:1px solid var(--line)}
+.bar{display:flex;align-items:center;justify-content:space-between;gap:16px;height:62px}
+.brand{display:flex;align-items:center;gap:12px;font:800 1.55rem/1 var(--serif);letter-spacing:-.02em}
+.sun{width:24px;height:24px;border-radius:50%;background:var(--sun);box-shadow:0 0 0 5px rgba(255,201,51,.3);flex:none}
+.search-btn{display:flex;align-items:center;gap:8px;padding:9px 16px;border-radius:999px;border:1px solid var(--line);
+ background:var(--bg);color:var(--ink);font:600 .92rem var(--sans);cursor:pointer}
+.search-btn:hover{border-color:var(--ink)}
+nav.cats{display:flex;gap:6px;overflow-x:auto;padding:0 0 10px;scrollbar-width:none;margin:0 -4px}
+nav.cats::-webkit-scrollbar{display:none}
+nav.cats a{display:flex;align-items:center;gap:8px;padding:7px 14px;border-radius:999px;white-space:nowrap;
+ font:600 .92rem var(--sans);color:var(--ink)}
+nav.cats a:hover{background:var(--bg)}
+nav.cats a[aria-current]{background:var(--ink);color:var(--paper)}
+nav.cats i,.chip i{width:9px;height:9px;border-radius:50%;background:var(--c,#5b6b7d);flex:none;display:block}
+
+.today{display:flex;flex-wrap:wrap;gap:2px 20px;padding:26px 0 4px;color:var(--muted);font:500 .95rem var(--sans)}
+.today strong{color:var(--ink);font-weight:700}
+
+.media{position:relative;overflow:hidden;border-radius:14px;aspect-ratio:3/2;--c:#5b6b7d;
+ background-color:color-mix(in srgb,var(--c) 16%,var(--paper));
+ background-image:radial-gradient(color-mix(in srgb,var(--c) 50%,transparent) 1.5px,transparent 1.7px);
+ background-size:13px 13px}
+.media img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block}
+.chip{display:inline-flex;align-items:center;gap:8px;font:700 .86rem var(--sans);color:var(--ink);--c:#5b6b7d}
+.meta{display:flex;flex-wrap:wrap;gap:2px 14px;font:.84rem var(--sans);color:var(--muted)}
+.meta b{font-weight:600;color:var(--ink)}
+.stretch::after{content:"";position:absolute;inset:0}
+.lead,.mini,.card{position:relative}
+article a.stretch:hover{text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:3px}
+
+.top{display:grid;grid-template-columns:minmax(0,1.75fr) minmax(0,1fr);gap:44px;padding:18px 0 48px}
+.top.solo{grid-template-columns:minmax(0,1fr)}
+.lead .media{aspect-ratio:16/9;border-radius:20px}
+.lead .body{padding-top:18px;display:flex;flex-direction:column;gap:10px}
+.lead h2{margin:0;font:800 clamp(1.95rem,1.2rem + 2.6vw,3.1rem)/1.07 var(--serif);letter-spacing:-.02em}
+.lead p{margin:0;font-size:1.15rem;color:var(--muted);max-width:62ch}
+.side{display:flex;flex-direction:column;gap:26px}
+.mini{display:grid;grid-template-columns:minmax(0,1fr) 116px;gap:18px;align-items:start}
+.mini .media{order:2;aspect-ratio:1;border-radius:12px}
+.mini .body{display:flex;flex-direction:column;gap:7px}
+.mini h3{margin:0;font:700 1.12rem/1.24 var(--serif)}
+
+h2.sec{margin:0 0 24px;font:800 1.7rem/1.1 var(--serif);letter-spacing:-.015em}
+.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:40px 30px}
+.card .body{display:flex;flex-direction:column;gap:7px;padding-top:14px}
+.card h3{margin:0;font:700 1.26rem/1.22 var(--serif);display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden}
+.card p{margin:0;color:var(--muted);font-size:.96rem;line-height:1.5;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.more-btn{display:block;margin:48px auto 8px;padding:13px 30px;border-radius:999px;border:2px solid var(--ink);
+ background:transparent;color:var(--ink);font:700 1rem var(--sans);cursor:pointer}
+.more-btn:hover{background:var(--ink);color:var(--paper)}
+.empty{padding:60px 0;max-width:52ch;font-size:1.15rem;color:var(--muted)}
+
+.cathead{margin:34px 0 36px;padding-left:20px;border-left:8px solid var(--c,#5b6b7d);--c:#5b6b7d}
+.cathead h1{margin:0;font:800 clamp(2.2rem,1.4rem + 3vw,3.4rem)/1.05 var(--serif);letter-spacing:-.02em}
+.cathead p{margin:8px 0 0;color:var(--muted)}
+
+.nota{max-width:780px;margin:34px auto 20px}
+.nota h1{margin:14px 0 14px;font:800 clamp(2rem,1.3rem + 2.8vw,3.2rem)/1.07 var(--serif);letter-spacing:-.02em}
+.nota .media{aspect-ratio:16/9;border-radius:20px;margin:26px 0}
+.nota .stand{margin:22px 0 0;font:400 1.32rem/1.55 var(--serif);max-width:62ch}
+.nota .media + .stand{margin-top:0}
+.source-box{margin:30px 0 18px;padding:24px;border-radius:16px;background:color-mix(in srgb,var(--sun) 24%,var(--paper))}
+.source-box p{margin:0 0 14px;font-weight:500}
+.btn{display:inline-block;padding:13px 22px;border-radius:12px;background:var(--btn);color:var(--btn-ink);font:700 1rem var(--sans)}
+.btn:hover{opacity:.88}
+.actions{display:flex;gap:10px;flex-wrap:wrap}
+.actions button{padding:9px 18px;border-radius:999px;border:1px solid var(--line);background:var(--paper);color:var(--ink);font:600 .92rem var(--sans);cursor:pointer}
+.actions button:hover{border-color:var(--ink)}
+.related{margin:56px 0 24px}
+
+dialog.search{border:0;border-radius:20px;padding:0;width:min(660px,calc(100% - 28px));margin:9vh auto auto;background:var(--paper);color:var(--ink);overflow:hidden}
+dialog.search::backdrop{background:rgba(8,16,30,.6)}
+.srow{display:flex;align-items:center;border-bottom:1px solid var(--line)}
+dialog.search input{flex:1;min-width:0;padding:20px 22px;font:500 1.2rem var(--sans);border:0;background:transparent;color:inherit;outline:none}
+.srow button{border:0;background:none;color:var(--muted);font:600 .92rem var(--sans);padding:12px 22px;cursor:pointer}
+.srow button:hover{color:var(--ink)}
+#results{max-height:55vh;overflow:auto}
+#results a{display:block;padding:13px 22px}
+#results a:hover,#results a:focus-visible{background:var(--bg)}
+#results b{display:block;font:700 1.05rem/1.3 var(--serif)}
+#results span{font:.84rem var(--sans);color:var(--muted)}
+#results p{margin:0;padding:18px 22px;color:var(--muted)}
+
+footer.site{margin-top:72px;padding:34px 0 48px;border-top:1px solid var(--line);color:var(--muted);font:.92rem/1.6 var(--sans)}
+footer.site p{margin:0 0 6px;max-width:70ch}
+footer.site a{text-decoration:underline}
+
+@media(max-width:900px){
+ .top{grid-template-columns:minmax(0,1fr);gap:36px}
+ .grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:34px 24px}
+}
+@media(max-width:600px){
+ .wrap{padding:0 16px}
+ .search-btn span{display:none}.search-btn{padding:10px}
+ .grid{grid-template-columns:minmax(0,1fr);gap:24px}
+ .card{display:grid;grid-template-columns:minmax(0,1fr) 104px;gap:16px;align-items:start}
+ .card .media{order:2;aspect-ratio:1;border-radius:12px}
+ .card .body{padding-top:0}
+ .card h3{font-size:1.1rem;-webkit-line-clamp:5}
+ .card p{display:none}
+ .lead .media{border-radius:16px}
+ .nota .media{border-radius:16px}
+}
+@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
+"""
+
+JS = r"""
+(function(){
+  var root=document.documentElement.getAttribute('data-root')||'';
+  var dlg=document.getElementById('search'),input=document.getElementById('q'),out=document.getElementById('results'),idx=null;
+  function norm(s){return String(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'')}
+  function load(){
+    if(idx)return Promise.resolve();
+    return fetch(root+'search.json').then(function(r){return r.json()}).then(function(j){
+      idx=j.map(function(x){return{x:x,k:norm(x.t+' '+x.s+' '+x.c)}});
+    }).catch(function(){idx=[]});
+  }
+  function render(){
+    var q=norm(input.value.trim());
+    out.textContent='';
+    if(q.length<2)return;
+    var words=q.split(/\s+/),hits=idx.filter(function(e){return words.every(function(w){return e.k.indexOf(w)>-1})}).slice(0,8);
+    if(!hits.length){var p=document.createElement('p');p.textContent='No hay resultados para «'+input.value.trim()+'». Prueba con otra palabra.';out.appendChild(p);return}
+    hits.forEach(function(h){
+      var a=document.createElement('a');a.href=root+h.x.u;
+      var b=document.createElement('b');b.textContent=h.x.t;
+      var s=document.createElement('span');s.textContent=h.x.c;
+      a.appendChild(b);a.appendChild(s);out.appendChild(a);
+    });
+  }
+  function open(){
+    if(!dlg||!dlg.showModal)return;
+    dlg.showModal();input.focus();load().then(render);
+  }
+  document.querySelectorAll('[data-search]').forEach(function(b){b.addEventListener('click',open)});
+  if(input){input.addEventListener('input',function(){load().then(render)})}
+  if(dlg){dlg.addEventListener('click',function(e){if(e.target===dlg)dlg.close()})}
+  document.querySelectorAll('[data-close]').forEach(function(b){b.addEventListener('click',function(){dlg.close()})});
+  document.addEventListener('keydown',function(e){
+    var t=e.target&&e.target.tagName;
+    if(e.key==='Escape'&&dlg&&dlg.open){dlg.close();return}
+    if(e.key==='/'&&t!=='INPUT'&&t!=='TEXTAREA'){e.preventDefault();open()}
+  });
+  document.querySelectorAll('[data-more]').forEach(function(btn){
+    btn.addEventListener('click',function(){
+      var grid=btn.previousElementSibling,hid=grid.querySelectorAll('.more[hidden]');
+      for(var i=0;i<hid.length&&i<18;i++){hid[i].hidden=false}
+      if(grid.querySelectorAll('.more[hidden]').length===0)btn.remove();
+    });
+  });
+  function flash(btn,txt){var o=btn.textContent;btn.textContent=txt;setTimeout(function(){btn.textContent=o},2200)}
+  function copy(btn){
+    var url=location.href;
+    function ok(){flash(btn,'Enlace copiado')}
+    function fallback(){
+      var t=document.createElement('textarea');t.value=url;t.style.position='fixed';t.style.opacity='0';
+      document.body.appendChild(t);t.select();
+      try{if(document.execCommand('copy')){ok()}else{flash(btn,'No se pudo copiar')}}catch(e){flash(btn,'No se pudo copiar')}
+      t.remove();
+    }
+    if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(url).then(ok,fallback)}else{fallback()}
+  }
+  document.querySelectorAll('[data-copy]').forEach(function(b){b.addEventListener('click',function(){copy(b)})});
+  document.querySelectorAll('[data-share]').forEach(function(b){
+    b.addEventListener('click',function(){
+      if(navigator.share){navigator.share({title:b.getAttribute('data-title'),url:location.href}).catch(function(){})}
+      else{copy(b)}
+    });
+  });
+})();
 """
 
 
-def page(title, body, depth, desc="", og_image="", canonical=""):
+def build_css():
+    rules = "".join(f".cat-{slugify(c)}{{--c:{PALETTE[i % len(PALETTE)]}}}\n"
+                    for i, c in enumerate(CFG["categories"]))
+    return CSS_BASE + "\n" + rules
+
+
+# ---------------------------------------------------------------- render
+FAVICON = ("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E"
+           "%3Ccircle cx='16' cy='16' r='11' fill='%23ffc933'/%3E%3C/svg%3E")
+SEARCH_ICON = ('<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" '
+               'stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>')
+
+
+def cat_cls(c):
+    return "cat-" + slugify(c)
+
+
+def chip(c):
+    return f'<span class="chip {cat_cls(c)}"><i></i>{esc(c)}</span>'
+
+
+def meta(a):
+    return f'<div class="meta"><b>{esc(a["source"])}</b><time datetime="{esc(a["date"])}">{short_date(a["date"])}</time></div>'
+
+
+def media(a, eager=False):
+    img = ""
+    if a.get("image"):
+        img = (f'<img src="{esc(a["image"])}" alt="" loading="{"eager" if eager else "lazy"}" decoding="async" '
+               f'referrerpolicy="no-referrer" onerror="this.remove()" onload="if(this.naturalWidth<60)this.remove()">')
+    return f'<div class="media {cat_cls(a["category"])}">{img}</div>'
+
+
+def page(title, body, depth, desc="", og_image="", canonical="", current=None):
     r = "../" * depth
-    nav = f'<a href="{r}index.html">Portada</a>' + "".join(
-        f'<a href="{r}categoria/{slugify(c)}.html">{esc(c)}</a>' for c in CFG["categories"])
+    items = [f'<a href="{r}index.html"' + (' aria-current="page"' if current == "home" else "") + ">Portada</a>"]
+    for c in CFG["categories"]:
+        cur = ' aria-current="page"' if current == c else ""
+        items.append(f'<a class="{cat_cls(c)}" href="{r}categoria/{slugify(c)}.html"{cur}><i></i>{esc(c)}</a>')
     og = f'<meta property="og:image" content="{esc(og_image)}">' if og_image else ""
     can = f'<link rel="canonical" href="{esc(canonical)}">' if canonical else ""
-    feed = f'<link rel="alternate" type="application/rss+xml" title="{esc(CFG["site_name"])}" href="{r}feed.xml">' \
-        if CFG["site_url"] else ""
-    year = datetime.now().year
-    return f"""<!doctype html><html lang="{CFG['language']}"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{esc(title)}</title><meta name="description" content="{esc(desc or CFG['tagline'])}">
-<meta property="og:title" content="{esc(title)}"><meta property="og:description" content="{esc(desc or CFG['tagline'])}">
-{og}{can}{feed}<link rel="stylesheet" href="{r}style.css"></head><body>
-<header class="top"><div class="wrap"><a class="brand" href="{r}index.html">☀ <span>{esc(CFG['site_name'])}</span></a>
-<div class="tag">{esc(CFG['tagline'])}</div><nav>{nav}</nav></div></header>
+    feed = (f'<link rel="alternate" type="application/rss+xml" title="{esc(CFG["site_name"])}" href="{r}feed.xml">'
+            if CFG["site_url"] else "")
+    rss = f' <a href="{r}feed.xml">Suscríbete por RSS</a>.' if CFG["site_url"] else ""
+    d = esc(desc or CFG["tagline"])
+    return f"""<!doctype html><html lang="{CFG['language']}" data-root="{r}"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#ffc933">
+<title>{esc(title)}</title><meta name="description" content="{d}">
+<meta property="og:title" content="{esc(title)}"><meta property="og:description" content="{d}"><meta property="og:type" content="website">
+{og}{can}{feed}<link rel="icon" href="{FAVICON}"><link rel="stylesheet" href="{r}style.css">
+<noscript><style>.more[hidden]{{display:block}}.more-btn{{display:none}}</style></noscript></head><body>
+<header class="site"><div class="wrap"><div class="bar">
+<a class="brand" href="{r}index.html"><span class="sun"></span>{esc(CFG['site_name'])}</a>
+<button class="search-btn" type="button" data-search aria-label="Buscar historias">{SEARCH_ICON}<span>Buscar</span></button>
+</div><nav class="cats" aria-label="Secciones">{"".join(items)}</nav></div></header>
 <main class="wrap">{body}</main>
-<footer><div class="wrap">© {year} {esc(CFG['site_name'])}. Selección automática de noticias positivas; cada nota enlaza a su fuente original.</div></footer>
-</body></html>"""
+<footer class="site"><div class="wrap"><p><strong>{esc(CFG['site_name'])}</strong> reúne noticias positivas de medios de todo el mundo. Cada historia es un resumen que enlaza a la fuente original.{rss}</p>
+<p>© {datetime.now().year}</p></div></footer>
+<dialog id="search" class="search" aria-label="Buscar historias"><div class="srow"><input id="q" type="search" placeholder="Buscar historias" autocomplete="off" aria-label="Buscar historias"><button type="button" data-close>Cerrar</button></div><div id="results" aria-live="polite"></div></dialog>
+<script src="{r}app.js" defer></script></body></html>"""
 
 
-def card(a, r):
-    img = f'<img src="{esc(a["image"])}" alt="" loading="lazy">' if a.get("image") else '<div class="ph"></div>'
-    return (f'<a class="card" href="{r}nota/{a["slug"]}.html">{img}<div class="cb">'
-            f'<span class="cat">{esc(a["category"])}</span><h3>{esc(a["title"])}</h3>'
-            f'<p>{esc(a["summary"])}</p><time>{fmt_date(a["date"])}</time></div></a>')
+def card(a, r, hidden=False):
+    cls = "card more" if hidden else "card"
+    h = " hidden" if hidden else ""
+    return (f'<article class="{cls}"{h}>{media(a)}<div class="body">{chip(a["category"])}'
+            f'<h3><a class="stretch" href="{r}nota/{a["slug"]}.html">{esc(a["title"])}</a></h3>'
+            f'<p>{esc(a["summary"])}</p>{meta(a)}</div></article>')
 
 
-def render_home(arts):
+def river(items, r, first=18):
+    cards = "".join(card(a, r, hidden=i >= first) for i, a in enumerate(items))
+    btn = '<button class="more-btn" type="button" data-more>Mostrar más historias</button>' if len(items) > first else ""
+    return f'<div class="grid">{cards}</div>{btn}'
+
+
+def today_line(arts, built):
+    fecha = f"{DIAS[built.weekday()].capitalize()} {built.day} de {MESES[built.month - 1]}"
+    tz = site_tz()
+    n = 0
+    for a in arts:
+        try:
+            if datetime.fromisoformat(a["date"]).astimezone(tz).date() == built.date():
+                n += 1
+        except Exception:
+            pass
+    parts = [f"<strong>{fecha}</strong>", f"Actualizado a las {built.strftime('%H:%M')}"]
+    if n:
+        parts.append(f"{n} historia nueva hoy" if n == 1 else f"{n} historias nuevas hoy")
+    return '<div class="today">' + "".join(f"<span>{p}</span>" for p in parts) + "</div>"
+
+
+def render_home(arts, built):
     if not arts:
-        body = "<p>Aún no hay notas. Ejecuta <code>python build.py</code> para cargar las primeras.</p>"
-        return page(CFG["site_name"], body, 0)
-    h = arts[0]
-    img = f'<img src="{esc(h["image"])}" alt="">' if h.get("image") else '<div class="ph"></div>'
-    hero = (f'<a class="hero" href="nota/{h["slug"]}.html">{img}<div><span class="cat">{esc(h["category"])}</span>'
-            f'<h2>{esc(h["title"])}</h2><p class="lead">{esc(h["summary"])}</p><time>{fmt_date(h["date"])}</time></div></a>')
-    grid = '<div class="grid">' + "".join(card(a, "") for a in arts[1:30]) + "</div>"
-    return page(f"{CFG['site_name']} — {CFG['tagline']}", hero + grid, 0,
-                og_image=h.get("image", ""), canonical=(CFG["site_url"] + "/") if CFG["site_url"] else "")
+        body = ('<div class="empty"><h1 class="sec">Todavía no hay historias</h1>'
+                "<p>La primera actualización automática las traerá en unas horas.</p></div>")
+        return page(CFG["site_name"], body, 0, current="home")
+    lead, side, rest = arts[0], arts[1:5], arts[5:125]
+    minis = "".join(
+        f'<article class="mini"><div class="body">{chip(a["category"])}'
+        f'<h3><a class="stretch" href="nota/{a["slug"]}.html">{esc(a["title"])}</a></h3>{meta(a)}</div>{media(a)}</article>'
+        for a in side)
+    top = (f'<section class="top{"" if side else " solo"}"><article class="lead">{media(lead, eager=True)}'
+           f'<div class="body">{chip(lead["category"])}<h2><a class="stretch" href="nota/{lead["slug"]}.html">{esc(lead["title"])}</a></h2>'
+           f'<p>{esc(lead["summary"])}</p>{meta(lead)}</div></article>'
+           + (f'<div class="side">{minis}</div>' if side else "") + "</section>")
+    more = f'<section><h2 class="sec">Últimas historias</h2>{river(rest, "")}</section>' if rest else ""
+    canon = (CFG["site_url"] + "/") if CFG["site_url"] else ""
+    return page(f"{CFG['site_name']}: {CFG['tagline']}", today_line(arts, built) + top + more, 0,
+                og_image=lead.get("image", ""), canonical=canon, current="home")
 
 
-def render_article(a):
-    img = f'<img src="{esc(a["image"])}" alt="">' if a.get("image") else ""
-    body = (f'<article class="nota"><span class="cat">{esc(a["category"])}</span><h1>{esc(a["title"])}</h1>'
-            f'<div class="meta">{fmt_date(a["date"])} · Fuente: {esc(a["source"])}</div>{img}'
-            f'<p class="lead">{esc(a["summary"])}</p>'
-            f'<a class="btn" href="{esc(a["url"])}" target="_blank" rel="noopener">Leer la nota completa en {esc(a["source"])} →</a>'
-            f'</article>')
+def render_article(a, arts):
+    same = [x for x in arts if x["category"] == a["category"] and x["id"] != a["id"]][:3]
+    if len(same) >= 2:
+        rel_title, rel = f"Más de {a['category']}", same
+    else:
+        rel_title, rel = "Sigue leyendo", [x for x in arts if x["id"] != a["id"]][:3]
+    related = (f'<section class="related"><h2 class="sec">{esc(rel_title)}</h2>'
+               f'<div class="grid">{"".join(card(x, "../") for x in rel)}</div></section>') if rel else ""
+    body = (f'<article class="nota"><a class="chip {cat_cls(a["category"])}" href="../categoria/{slugify(a["category"])}.html">'
+            f'<i></i>{esc(a["category"])}</a><h1>{esc(a["title"])}</h1>'
+            f'<div class="meta"><b>{esc(a["source"])}</b><time datetime="{esc(a["date"])}">{fmt_date(a["date"])}</time></div>'
+            f'{media(a, eager=True) if a.get("image") else ""}<p class="stand">{esc(a["summary"])}</p>'
+            f'<div class="source-box"><p>Esto es un resumen. La nota completa está en {esc(a["source"])}.</p>'
+            f'<a class="btn" href="{esc(a["url"])}" target="_blank" rel="noopener">Leer la nota completa en {esc(a["source"])}</a></div>'
+            f'<div class="actions"><button type="button" data-share data-title="{esc(a["title"])}">Compartir</button>'
+            f'<button type="button" data-copy>Copiar enlace</button></div></article>{related}')
     can = f'{CFG["site_url"]}/nota/{a["slug"]}.html' if CFG["site_url"] else ""
-    return page(f'{a["title"]} — {CFG["site_name"]}', body, 1, a["summary"], a.get("image", ""), can)
+    return page(f'{a["title"]} | {CFG["site_name"]}', body, 1, a["summary"], a.get("image", ""), can,
+                current=a["category"])
 
 
-def render_category(cat, arts):
-    body = f'<h1 class="sec">{esc(cat)}</h1>'
-    body += '<div class="grid">' + "".join(card(a, "../") for a in arts) + "</div>" if arts \
-        else "<p>Todavía no hay notas en esta categoría.</p>"
-    return page(f"{cat} — {CFG['site_name']}", body, 1)
+def render_category(cat, items):
+    n = len(items)
+    count = "Todavía no hay historias en esta sección." if not n else (
+        "1 historia" if n == 1 else f"{n} historias")
+    head = f'<div class="cathead {cat_cls(cat)}"><h1>{esc(cat)}</h1><p>{count}</p></div>'
+    body = head + (river(items, "../") if n else
+                   '<div class="empty">Esta sección se llena sola: vuelve en unas horas.</div>')
+    return page(f"{cat} | {CFG['site_name']}", body, 1, current=cat)
 
 
 def write(path, content):
@@ -368,15 +749,20 @@ def write(path, content):
 
 
 def build_site(arts):
+    built = datetime.now(site_tz())
     OUT.mkdir(exist_ok=True)
     for old in (OUT / "nota").glob("*.html") if (OUT / "nota").exists() else []:
         old.unlink()
-    write(OUT / "style.css", CSS)
-    write(OUT / "index.html", render_home(arts))
+    write(OUT / "style.css", build_css())
+    write(OUT / "app.js", JS)
+    write(OUT / "index.html", render_home(arts, built))
     for a in arts:
-        write(OUT / "nota" / f'{a["slug"]}.html', render_article(a))
+        write(OUT / "nota" / f'{a["slug"]}.html', render_article(a, arts))
     for c in CFG["categories"]:
         write(OUT / "categoria" / f"{slugify(c)}.html", render_category(c, [a for a in arts if a["category"] == c]))
+    write(OUT / "search.json", json.dumps(
+        [{"t": a["title"], "s": truncate(a["summary"], 160), "c": a["category"], "u": f'nota/{a["slug"]}.html'}
+         for a in arts], ensure_ascii=False, separators=(",", ":")))
     write(OUT / "robots.txt", "User-agent: *\nAllow: /\n" + (f"Sitemap: {CFG['site_url']}/sitemap.xml\n" if CFG["site_url"] else ""))
     if CFG["site_url"]:
         u = CFG["site_url"]
@@ -403,6 +789,7 @@ def main():
     arts = json.loads(DATA_FILE.read_text(encoding="utf-8")) if DATA_FILE.exists() else []
     if "--no-fetch" not in sys.argv:
         arts = fetch_new(arts) + arts
+        backfill_images(arts)
         print(f"Notas nuevas incorporadas. Total: {len(arts)}")
     arts.sort(key=lambda a: a["date"], reverse=True)
     arts = arts[: CFG["max_articles"]]
