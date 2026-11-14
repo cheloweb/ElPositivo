@@ -274,6 +274,14 @@ def passes_blocklist(text):
     return not any(w in t for w in CFG["blocklist"])
 
 
+def blocked_word(text):
+    t = " " + text.lower() + " "
+    for w in CFG["blocklist"]:
+        if w in t:
+            return w
+    return ""
+
+
 def has_positive_keyword(text):
     t = text.lower()
     return any(w in t for w in CFG.get("positive_keywords", []))
@@ -372,23 +380,32 @@ def fetch_new(articles):
         except Exception as ex:
             print(f"  no disponible: {ex}")
             continue
+        st = {"leídas": 0, "ya conocidas": 0, "descartadas por palabra": 0,
+              "sin palabra positiva": 0, "rechazadas por IA": 0, "nuevas": 0}
         for it in items[:25]:
             if len(new) >= limit:
                 break
             aid = hashlib.sha1(it["link"].encode()).hexdigest()[:10]
+            st["leídas"] += 1
             if aid in known:
+                st["ya conocidas"] += 1
                 continue
             raw = clean_summary(strip_html(it.get("desc") or it.get("content") or ""))
-            if not passes_blocklist(it["title"] + " " + raw[:400]):
+            hit = blocked_word(it["title"] + " " + raw[:400])
+            if hit:
+                st["descartadas por palabra"] += 1
+                print(f"  - descartada por «{hit.strip()}»: {it['title'][:60]}")
                 known.add(aid)
                 continue
             if feed.get("mode") == "keywords" and not has_positive_keyword(it["title"] + " " + raw[:400]):
+                st["sin palabra positiva"] += 1
                 known.add(aid)
                 continue
             # Feeds en español no necesitan traducción: se omite la IA (y el gasto de API).
             use_ai = feed.get("lang", "en") != "es" or CFG.get("ai_for_spanish", False)
             ai = ai_curate(it["title"], raw) if use_ai else None
             if ai is not None and not ai.get("positiva", False):
+                st["rechazadas por IA"] += 1
                 known.add(aid)
                 continue
             title = (ai or {}).get("titulo") or it["title"]
@@ -410,7 +427,9 @@ def fetch_new(articles):
                 "url": it["link"],
                 "date": parse_date(it.get("date")).isoformat(),
             })
+            st["nuevas"] += 1
             print(f"  + {title[:70]}{'' if image else '  (sin imagen)'}")
+        print("  resumen: " + ", ".join(f"{v} {k}" for k, v in st.items()))
     return new
 
 
@@ -429,7 +448,7 @@ LOGO_SIZE = png_size(ASSETS / "logo.png")
 CSS_BASE = """
 :root{
  --bg:#f4f7fb;--paper:#fff;--ink:#012d5c;--muted:#4b627c;--line:#dbe4ef;--sun:#febd06;--sun-deep:#f5a200;--btn:#012d5c;--btn-ink:#fff;
- --serif:Charter,"Bitstream Charter","Sitka Text",Cambria,"Iowan Old Style",Georgia,serif;
+ --serif:"Avenir Next",Avenir,"Segoe UI Variable Display","Segoe UI",system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif;
  --sans:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
 }
 @media(prefers-color-scheme:dark){:root{--bg:#061a33;--paper:#0b2547;--ink:#eaf1f8;--muted:#a3b6cc;--line:#1d3a63;--btn:#febd06;--btn-ink:#012d5c}}
@@ -825,9 +844,10 @@ def main():
         return
     arts = json.loads(DATA_FILE.read_text(encoding="utf-8")) if DATA_FILE.exists() else []
     if "--no-fetch" not in sys.argv:
-        arts = fetch_new(arts) + arts
+        new_arts = fetch_new(arts)
+        arts = new_arts + arts
         backfill_images(arts)
-        print(f"Notas nuevas incorporadas. Total: {len(arts)}")
+        print(f"Notas nuevas: {len(new_arts)}. Total: {len(arts)}")
     arts.sort(key=lambda a: a["date"], reverse=True)
     arts = arts[: CFG["max_articles"]]
     write(DATA_FILE, json.dumps(arts, ensure_ascii=False, indent=1))

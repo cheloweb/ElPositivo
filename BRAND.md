@@ -30,10 +30,8 @@ Si una nota no trae imagen, su hueco se rellena con una trama de puntos del colo
 
 ## Tipografía
 
-- Titulares: serif de sistema (Charter, Sitka Text, Cambria), en negrita y con interletraje ajustado.
-- Texto e interfaz: sans de sistema.
+- Titulares y texto: sans de sistema (Avenir Next en Apple, Segoe UI en Windows, la del sistema en Android), con los titulares en negrita extra y el interletraje apretado. Hace juego con la sans geométrica del logo.
 - Sin fuentes externas: carga más rápido y no envía datos a terceros (RGPD).
-- El logo usa una sans geométrica. Si prefieres que los titulares hagan juego con ella, se cambia en `--serif` dentro de `build.py`.
 
 ## Tono
 
